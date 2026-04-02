@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x7dee81518166dBDa90Fa533110d9e154a9194aA1"; // ← replace with your full address
+const CONTRACT_ADDRESS = "0x185626CBfB63234d0B4BC9f1924E9859D40CDe93"; // ← replace with your FULL address
 const RPC_URL = "https://studio.genlayer.com/api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -11,34 +11,51 @@ const short   = (a)   => a ? `${a.slice(0,6)}...${a.slice(-4)}` : "";
 const catIcon = (c)   => ({crypto:"₿",sports:"⚽",world:"🌍"})[c]||"📊";
 const catClr  = (c)   => ({crypto:"#f59e0b",sports:"#10b981",world:"#3b82f6"})[c]||"#a855f7";
 
-// ── RPC read (no wallet needed) ───────────────────────────────────────────────
-const readContract = async () => {
+// ── GenLayer RPC ──────────────────────────────────────────────────────────────
+const glRpc = async (method, params=[]) => {
   const res  = await fetch(RPC_URL, {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"gen_call", params:[{ to:CONTRACT_ADDRESS, data:{method:"get_state",args:[]} },"latest"] }),
+    body: JSON.stringify({ jsonrpc:"2.0", id:Date.now(), method, params }),
   });
   const data = await res.json();
   if (data.error) throw new Error(data.error.message);
-  return JSON.parse(data.result);
+  return data.result;
 };
 
-// ── Poll for tx finalization ───────────────────────────────────────────────────
+const readContract = async () => {
+  const result = await glRpc("gen_call", [{
+    to: CONTRACT_ADDRESS,
+    data: { method:"get_state", args:[] },
+  }, "latest"]);
+  return JSON.parse(result);
+};
+
+// gasless — uses GenLayer's own RPC, no ETH gas needed
+const sendTx = async (from, method, valueGEN=0) => {
+  const hash = await glRpc("gen_sendTransaction", [{
+    from,
+    to:    CONTRACT_ADDRESS,
+    value: String(Math.floor(valueGEN * 1e18)),
+    data:  { method, args:[] },
+  }]);
+  return hash;
+};
+
+// poll for finalization
 const waitFinalized = async (hash, onStatus) => {
   for (let i=0; i<40; i++) {
     await new Promise(r=>setTimeout(r,3000));
     try {
-      const res    = await fetch(RPC_URL,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({jsonrpc:"2.0",id:1,method:"gen_getTransactionReceipt",params:[hash]}) });
-      const data   = await res.json();
-      const status = data.result?.status;
-      if (onStatus) onStatus(status||"PENDING");
-      if (status==="FINALIZED") return data.result;
-      if (status==="CANCELED")  throw new Error("Transaction was cancelled by network");
-    } catch(e){ if(e.message?.includes("cancelled")) throw e; }
+      const receipt = await glRpc("gen_getTransactionReceipt", [hash]);
+      if (onStatus) onStatus(receipt?.status||"PENDING");
+      if (receipt?.status==="FINALIZED") return receipt;
+      if (receipt?.status==="CANCELED")  throw new Error("Transaction was cancelled");
+    } catch(e) { if (e.message?.includes("cancelled")) throw e; }
   }
-  throw new Error("Transaction timed out after 2 minutes");
+  throw new Error("Transaction timed out");
 };
 
-// ── Static particle positions (avoid re-randomising on render) ───────────────
+// ── Static particles ──────────────────────────────────────────────────────────
 const DOTS = [...Array(22)].map((_,i)=>({
   w:1+Math.random()*3, l:Math.random()*100, t:Math.random()*100,
   o:0.08+Math.random()*0.2, d:7+Math.random()*8, dl:Math.random()*7,
@@ -49,7 +66,8 @@ function Particles() {
   return (
     <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:0,overflow:"hidden"}}>
       {DOTS.map((d,i)=>(
-        <div key={i} style={{position:"absolute",borderRadius:"50%",width:d.w,height:d.w,background:d.c,
+        <div key={i} style={{position:"absolute",borderRadius:"50%",
+          width:d.w,height:d.w,background:d.c,
           left:`${d.l}%`,top:`${d.t}%`,opacity:d.o,
           animation:`float ${d.d}s ease-in-out ${d.dl}s infinite`}}/>
       ))}
@@ -57,7 +75,7 @@ function Particles() {
   );
 }
 
-// ── Wallet connect modal ───────────────────────────────────────────────────────
+// ── Wallet modal ──────────────────────────────────────────────────────────────
 function WalletModal({ onConnect, onClose }) {
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState("");
@@ -67,7 +85,7 @@ function WalletModal({ onConnect, onClose }) {
     try {
       if (!window.ethereum) throw new Error("MetaMask not found.\nInstall it from metamask.io then refresh.");
       const accounts = await window.ethereum.request({ method:"eth_requestAccounts" });
-      if (!accounts.length) throw new Error("No accounts returned from MetaMask");
+      if (!accounts.length) throw new Error("No accounts found in MetaMask");
       onConnect(accounts[0]);
     } catch(e) { setError(e.message||"Connection failed"); }
     setBusy(false);
@@ -79,7 +97,7 @@ function WalletModal({ onConnect, onClose }) {
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:28}}>
           <div>
             <div style={{fontWeight:900,fontSize:18}}>Connect Wallet</div>
-            <div style={{fontSize:12,color:"rgba(237,232,255,0.35)",marginTop:2}}>Sign transactions to bet &amp; resolve</div>
+            <div style={{fontSize:12,color:"rgba(237,232,255,0.35)",marginTop:2}}>Sign in to place bets &amp; resolve</div>
           </div>
           <button onClick={onClose} style={{background:"rgba(255,255,255,0.06)",border:"none",borderRadius:8,width:32,height:32,color:"rgba(237,232,255,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
@@ -95,20 +113,26 @@ function WalletModal({ onConnect, onClose }) {
           {busy && <div className="sp"/>}
         </button>
 
+        <div style={{marginTop:12,background:"rgba(139,92,246,0.08)",border:"1px solid rgba(139,92,246,0.15)",borderRadius:12,padding:"12px 14px"}}>
+          <div style={{fontSize:12,color:"#a78bfa",fontWeight:700,marginBottom:4}}>💡 No gas needed</div>
+          <div style={{fontSize:12,color:"rgba(237,232,255,0.4)",lineHeight:1.6}}>GenLayer Studio is gasless. MetaMask is only used to identify your wallet address — no ETH required.</div>
+        </div>
+
         {error && (
           <div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.25)",borderRadius:12,padding:"12px 16px",marginTop:12}}>
             <div style={{fontSize:13,color:"#fca5a5",whiteSpace:"pre-line"}}>{error}</div>
           </div>
         )}
-        <div style={{marginTop:20,fontSize:11,color:"rgba(237,232,255,0.2)",textAlign:"center",lineHeight:1.7}}>
-          Your wallet signs transactions locally.<br/>No private keys are shared with this app.
+
+        <div style={{marginTop:16,fontSize:11,color:"rgba(237,232,255,0.18)",textAlign:"center",lineHeight:1.7}}>
+          Your wallet is used for identification only.<br/>Transactions are signed by GenLayer Studio.
         </div>
       </div>
     </div>
   );
 }
 
-// ── Floating tx status bar ─────────────────────────────────────────────────────
+// ── TX status bar ─────────────────────────────────────────────────────────────
 function TxBar({ hash, status, onClose }) {
   if (!hash) return null;
   const done   = status==="FINALIZED";
@@ -121,7 +145,7 @@ function TxBar({ hash, status, onClose }) {
       borderRadius:16,padding:"14px 20px",minWidth:300,maxWidth:"calc(100vw - 32px)",
       boxShadow:`0 8px 32px ${done?"rgba(16,185,129,0.15)":failed?"rgba(239,68,68,0.15)":"rgba(124,58,237,0.2)"}`,
       display:"flex",alignItems:"center",gap:12,animation:"slideU 0.3s ease"}}>
-      {done ? "✅" : failed ? "❌" : <div className="sp" style={{flexShrink:0}}/>}
+      {done?"✅":failed?"❌":<div className="sp" style={{flexShrink:0}}/>}
       <div style={{flex:1}}>
         <div style={{fontSize:13,fontWeight:700,color}}>{done?"Transaction Finalized!":failed?"Transaction Failed":status||"Processing..."}</div>
         <div className="mono" style={{fontSize:10,color:"rgba(237,232,255,0.3)",marginTop:2}}>{short(hash)}</div>
@@ -144,47 +168,53 @@ export default function App() {
   const [txHash,     setTxHash]     = useState(null);
   const [txStatus,   setTxStatus]   = useState("");
 
-  const show = (msg, type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),4000); };
+  const show = (msg, type="success") => {
+    setToast({msg,type});
+    setTimeout(()=>setToast(null),4000);
+  };
 
   const load = useCallback(async () => {
     try { setMarket(await readContract()); }
     catch {
-      setMarket({question:"Will BTC reach 100000 USD before July 2026?",category:"crypto",
-        resolved:false,outcome:false,total_yes:"100000000000000000000",
-        total_no:"50000000000000000000",yes_odds:"175",no_odds:"120"});
+      setMarket({
+        question:"Will BTC reach 100000 USD before July 2026?",
+        category:"crypto", resolved:false, outcome:false,
+        total_yes:"100000000000000000000", total_no:"50000000000000000000",
+        yes_odds:"175", no_odds:"120",
+      });
     }
     setLoading(false);
   },[]);
 
   useEffect(()=>{ load(); },[load]);
 
-  // listen for MetaMask account changes
   useEffect(()=>{
     if (!window.ethereum) return;
-    const h = (accs) => { if(!accs.length){setAccount(null);show("Wallet disconnected");}else setAccount(accs[0]); };
-    window.ethereum.on("accountsChanged",h);
-    return ()=>window.ethereum.removeListener("accountsChanged",h);
+    const h = (accs) => {
+      if (!accs.length) { setAccount(null); show("Wallet disconnected"); }
+      else setAccount(accs[0]);
+    };
+    window.ethereum.on("accountsChanged", h);
+    return ()=>window.ethereum.removeListener("accountsChanged", h);
   },[]);
 
-  const handleConnect = (addr) => { setAccount(addr); setShowWallet(false); show(`Connected: ${short(addr)}`); };
-  const disconnect    = ()     => { setAccount(null); show("Wallet disconnected"); };
+  const handleConnect = (addr) => {
+    setAccount(addr);
+    setShowWallet(false);
+    show(`Connected: ${short(addr)}`);
+  };
 
-  // send tx via MetaMask
-  const sendTx = async (method, valueGEN=0) => {
-    if (!account) { setShowWallet(true); return null; }
-    const valueHex = "0x"+BigInt(Math.floor(valueGEN*1e18)).toString(16);
-    const txData   = JSON.stringify({method,args:[]});
-    const dataHex  = "0x"+Array.from(new TextEncoder().encode(txData)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  const disconnect = () => { setAccount(null); show("Wallet disconnected"); };
 
-    const hash = await window.ethereum.request({ method:"eth_sendTransaction", params:[{
-      from:account, to:CONTRACT_ADDRESS, value:valueHex, data:dataHex, gas:"0x186A0",
-    }]});
-
-    setTxHash(hash); setTxStatus("PENDING");
-    const receipt = await waitFinalized(hash, setTxStatus);
+  // send gasless tx via GenLayer RPC
+  const handleTx = async (method, valueGEN=0) => {
+    if (!account) { setShowWallet(true); return; }
+    const hash = await sendTx(account, method, valueGEN);
+    setTxHash(hash);
+    setTxStatus("PENDING");
+    await waitFinalized(hash, setTxStatus);
     setTxStatus("FINALIZED");
     await load();
-    return receipt;
   };
 
   const bet = async (side) => {
@@ -192,9 +222,12 @@ export default function App() {
     if (!account) { setShowWallet(true); return; }
     setBusy(side);
     try {
-      await sendTx(side==="yes"?"bet_yes":"bet_no", Number(betAmt));
+      await handleTx(side==="yes"?"bet_yes":"bet_no", Number(betAmt));
       show(`${side==="yes"?"✅ YES":"❌ NO"} bet of ${betAmt} GEN placed!`);
-    } catch(e) { show(e.message?.includes("rejected")?"Transaction rejected":e.message||"Bet failed","error"); setTxStatus("CANCELED"); }
+    } catch(e) {
+      show(e.message||"Bet failed","error");
+      setTxStatus("CANCELED");
+    }
     setBusy("");
   };
 
@@ -202,9 +235,12 @@ export default function App() {
     if (!account) { setShowWallet(true); return; }
     setBusy("resolve");
     try {
-      await sendTx("resolve",0);
+      await handleTx("resolve", 0);
       show("Market resolved by AI consensus! 🎉");
-    } catch(e) { show(e.message?.includes("rejected")?"Transaction rejected":e.message||"Resolution failed","error"); setTxStatus("CANCELED"); }
+    } catch(e) {
+      show(e.message||"Resolution failed","error");
+      setTxStatus("CANCELED");
+    }
     setBusy("");
   };
 
@@ -271,9 +307,10 @@ export default function App() {
           <div style={{width:38,height:38,borderRadius:11,background:"linear-gradient(135deg,#5b21b6,#a855f7)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:"0 4px 20px rgba(168,85,247,0.4)"}}>⚡</div>
           <div>
             <div style={{fontWeight:900,fontSize:17,letterSpacing:"-0.5px"}}>GENBET</div>
-            <div style={{fontSize:10,color:"rgba(237,232,255,0.3)",fontWeight:600,letterSpacing:1,textTransform:"uppercase"}}>AI Prediction Market</div>
+            <div style={{fontSize:10,color:"rgba(237,232,255,0.3)",fontWeight:600,letterSpacing:1,textTransform:"uppercase"}}>Bet on the Future</div>
           </div>
         </div>
+
         {account ? (
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:7,background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.2)",borderRadius:12,padding:"8px 14px"}}>
@@ -296,9 +333,10 @@ export default function App() {
         <div className="card" style={{width:"100%",maxWidth:520,padding:24,marginBottom:14,textAlign:"center",border:"1px solid rgba(99,102,241,0.2)"}}>
           <div style={{fontSize:28,marginBottom:12}}>🦊</div>
           <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Connect wallet to participate</div>
-          <div style={{fontSize:13,color:"rgba(237,232,255,0.4)",marginBottom:20,lineHeight:1.6}}>
-            You need MetaMask to place bets and resolve markets.<br/>You can view the market without connecting.
+          <div style={{fontSize:13,color:"rgba(237,232,255,0.4)",marginBottom:8,lineHeight:1.6}}>
+            Connect MetaMask to place bets and resolve markets.
           </div>
+          <div style={{fontSize:12,color:"#a78bfa",marginBottom:20}}>💡 No gas fees — GenLayer Studio is gasless</div>
           <button className="btn" onClick={()=>setShowWallet(true)} style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",color:"#fff",padding:"13px 28px",fontSize:14,borderRadius:13,boxShadow:"0 4px 20px rgba(124,58,237,0.3)"}}>
             Connect MetaMask
           </button>
@@ -373,6 +411,7 @@ export default function App() {
           {tab==="bet" && (<>
             <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,color:"#7c3aed",textTransform:"uppercase",marginBottom:12}}>Bet Amount (GEN)</div>
             <input className="input" type="number" min="1" value={betAmt} onChange={e=>setBetAmt(e.target.value)} placeholder="100"/>
+
             <div style={{display:"flex",gap:8,margin:"12px 0 18px"}}>
               {["50","100","500","1000"].map(v=>(
                 <button key={v} className="qbtn" onClick={()=>setBetAmt(v)} style={{
@@ -442,9 +481,9 @@ export default function App() {
             {[
               ["Contract",    CONTRACT_ADDRESS],
               ["Network",     "GenLayer Studio"],
-              ["Category",    market.category],
-              ["YES Odds",    `${market.yes_odds}x multiplier`],
-              ["NO Odds",     `${market.no_odds}x multiplier`],
+              ["Category",    market?.category||"—"],
+              ["YES Odds",    `${market?.yes_odds}x multiplier`],
+              ["NO Odds",     `${market?.no_odds}x multiplier`],
               ["Your Wallet", account?short(account):"Not connected"],
             ].map(([l,v])=>(
               <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"10px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
@@ -466,7 +505,7 @@ export default function App() {
       )}
 
       <div style={{marginTop:24,fontSize:11,color:"rgba(237,232,255,0.12)",letterSpacing:0.5,textAlign:"center"}}>
-        GENBET · Powered by Optimistic Democracy &amp; AI
+        GENBET · Built on GenLayer · Powered by AI
       </div>
     </div>
   </>);
