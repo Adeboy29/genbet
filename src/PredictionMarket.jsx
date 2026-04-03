@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
+import { createClient } from "genlayer-js";
+import { studionet } from "genlayer-js/chains";
+import { TransactionStatus } from "genlayer-js/types";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const CONTRACT_ADDRESS = "0x7dee81518166dBDa90Fa533110d9e154a9194aA1"; // ← replace with your FULL address
-const RPC_URL = "https://studio.genlayer.com/api";
+
+// ── Read client (no wallet needed) ───────────────────────────────────────────
+const readClient = createClient({ chain: studionet });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const toGEN   = (wei) => wei ? (Number(BigInt(String(wei))) / 1e18).toFixed(2) : "0.00";
@@ -10,50 +15,6 @@ const pct     = (a,b) => { const t=Number(a||0)+Number(b||0); return t===0?50:Ma
 const short   = (a)   => a ? `${a.slice(0,6)}...${a.slice(-4)}` : "";
 const catIcon = (c)   => ({crypto:"₿",sports:"⚽",world:"🌍"})[c]||"📊";
 const catClr  = (c)   => ({crypto:"#f59e0b",sports:"#10b981",world:"#3b82f6"})[c]||"#a855f7";
-
-// ── GenLayer RPC ──────────────────────────────────────────────────────────────
-const glRpc = async (method, params=[]) => {
-  const res  = await fetch(RPC_URL, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ jsonrpc:"2.0", id:Date.now(), method, params }),
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  return data.result;
-};
-
-const readContract = async () => {
-  const result = await glRpc("gen_call", [{
-    to: CONTRACT_ADDRESS,
-    data: { method:"get_state", args:[] },
-  }, "latest"]);
-  return JSON.parse(result);
-};
-
-// gasless — uses GenLayer's own RPC, no ETH gas needed
-const sendTx = async (from, method, valueGEN=0) => {
-  const hash = await glRpc("eth_sendTransaction", [{
-    from,
-    to:    CONTRACT_ADDRESS,
-    value: String(Math.floor(valueGEN * 1e18)),
-    data:  { method, args:[] },
-  }]);
-  return hash;
-};
-
-// poll for finalization
-const waitFinalized = async (hash, onStatus) => {
-  for (let i=0; i<40; i++) {
-    await new Promise(r=>setTimeout(r,3000));
-    try {
-      const receipt = await glRpc("gen_getTransactionReceipt", [hash]);
-      if (onStatus) onStatus(receipt?.status||"PENDING");
-      if (receipt?.status==="FINALIZED") return receipt;
-      if (receipt?.status==="CANCELED")  throw new Error("Transaction was cancelled");
-    } catch(e) { if (e.message?.includes("cancelled")) throw e; }
-  }
-  throw new Error("Transaction timed out");
-};
 
 // ── Static particles ──────────────────────────────────────────────────────────
 const DOTS = [...Array(22)].map((_,i)=>({
@@ -114,8 +75,8 @@ function WalletModal({ onConnect, onClose }) {
         </button>
 
         <div style={{marginTop:12,background:"rgba(139,92,246,0.08)",border:"1px solid rgba(139,92,246,0.15)",borderRadius:12,padding:"12px 14px"}}>
-          <div style={{fontSize:12,color:"#a78bfa",fontWeight:700,marginBottom:4}}>💡 No gas needed</div>
-          <div style={{fontSize:12,color:"rgba(237,232,255,0.4)",lineHeight:1.6}}>GenLayer Studio is gasless. MetaMask is only used to identify your wallet address — no ETH required.</div>
+          <div style={{fontSize:12,color:"#a78bfa",fontWeight:700,marginBottom:4}}>💡 No gas fees</div>
+          <div style={{fontSize:12,color:"rgba(237,232,255,0.4)",lineHeight:1.6}}>GenLayer Studio is gasless. MetaMask is only used to identify your wallet — no ETH required.</div>
         </div>
 
         {error && (
@@ -123,9 +84,8 @@ function WalletModal({ onConnect, onClose }) {
             <div style={{fontSize:13,color:"#fca5a5",whiteSpace:"pre-line"}}>{error}</div>
           </div>
         )}
-
         <div style={{marginTop:16,fontSize:11,color:"rgba(237,232,255,0.18)",textAlign:"center",lineHeight:1.7}}>
-          Your wallet is used for identification only.<br/>Transactions are signed by GenLayer Studio.
+          Your wallet identifies you only.<br/>No ETH or gas is required.
         </div>
       </div>
     </div>
@@ -174,8 +134,14 @@ export default function App() {
   };
 
   const load = useCallback(async () => {
-    try { setMarket(await readContract()); }
-    catch {
+    try {
+      const result = await readClient.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: "get_state",
+        args: [],
+      });
+      setMarket(typeof result === "string" ? JSON.parse(result) : result);
+    } catch {
       setMarket({
         question:"Will BTC reach 100000 USD before July 2026?",
         category:"crypto", resolved:false, outcome:false,
@@ -206,15 +172,39 @@ export default function App() {
 
   const disconnect = () => { setAccount(null); show("Wallet disconnected"); };
 
-  // send gasless tx via GenLayer RPC
+  // write using genlayer-js SDK with MetaMask
   const handleTx = async (method, valueGEN=0) => {
     if (!account) { setShowWallet(true); return; }
-    const hash = await sendTx(account, method, valueGEN);
-    setTxHash(hash);
+
+    // create write client with connected wallet address
+    const writeClient = createClient({
+      chain: studionet,
+      account: account,
+    });
+
+    // switch MetaMask to studionet
+    await writeClient.connect("studionet");
+
+    const txHash = await writeClient.writeContract({
+      address: CONTRACT_ADDRESS,
+      functionName: method,
+      args: [],
+      value: BigInt(Math.floor(valueGEN * 1e18)),
+    });
+
+    setTxHash(txHash);
     setTxStatus("PENDING");
-    await waitFinalized(hash, setTxStatus);
+
+    const receipt = await writeClient.waitForTransactionReceipt({
+      hash: txHash,
+      status: TransactionStatus.FINALIZED,
+      interval: 3000,
+      retries: 30,
+    });
+
     setTxStatus("FINALIZED");
     await load();
+    return receipt;
   };
 
   const bet = async (side) => {
@@ -225,7 +215,10 @@ export default function App() {
       await handleTx(side==="yes"?"bet_yes":"bet_no", Number(betAmt));
       show(`${side==="yes"?"✅ YES":"❌ NO"} bet of ${betAmt} GEN placed!`);
     } catch(e) {
-      show(e.message||"Bet failed","error");
+      const msg = e.message||"";
+      if (msg.includes("rejected")) show("Transaction rejected","error");
+      else if (msg.includes("chain")) show("Please switch MetaMask to GenLayer Studio network","error");
+      else show(msg||"Bet failed","error");
       setTxStatus("CANCELED");
     }
     setBusy("");
@@ -238,7 +231,10 @@ export default function App() {
       await handleTx("resolve", 0);
       show("Market resolved by AI consensus! 🎉");
     } catch(e) {
-      show(e.message||"Resolution failed","error");
+      const msg = e.message||"";
+      if (msg.includes("rejected")) show("Transaction rejected","error");
+      else if (msg.includes("chain")) show("Please switch MetaMask to GenLayer Studio network","error");
+      else show(msg||"Resolution failed","error");
       setTxStatus("CANCELED");
     }
     setBusy("");
@@ -310,7 +306,6 @@ export default function App() {
             <div style={{fontSize:10,color:"rgba(237,232,255,0.3)",fontWeight:600,letterSpacing:1,textTransform:"uppercase"}}>Bet on the Future</div>
           </div>
         </div>
-
         {account ? (
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:7,background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.2)",borderRadius:12,padding:"8px 14px"}}>
@@ -333,9 +328,7 @@ export default function App() {
         <div className="card" style={{width:"100%",maxWidth:520,padding:24,marginBottom:14,textAlign:"center",border:"1px solid rgba(99,102,241,0.2)"}}>
           <div style={{fontSize:28,marginBottom:12}}>🦊</div>
           <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Connect wallet to participate</div>
-          <div style={{fontSize:13,color:"rgba(237,232,255,0.4)",marginBottom:8,lineHeight:1.6}}>
-            Connect MetaMask to place bets and resolve markets.
-          </div>
+          <div style={{fontSize:13,color:"rgba(237,232,255,0.4)",marginBottom:8,lineHeight:1.6}}>Connect MetaMask to place bets and resolve markets.</div>
           <div style={{fontSize:12,color:"#a78bfa",marginBottom:20}}>💡 No gas fees — GenLayer Studio is gasless</div>
           <button className="btn" onClick={()=>setShowWallet(true)} style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",color:"#fff",padding:"13px 28px",fontSize:14,borderRadius:13,boxShadow:"0 4px 20px rgba(124,58,237,0.3)"}}>
             Connect MetaMask
@@ -359,11 +352,7 @@ export default function App() {
               {market.resolved?"✓ Resolved":"● Live"}
             </span>
           </div>
-
-          <h2 style={{fontSize:20,fontWeight:800,lineHeight:1.35,marginBottom:22,color:"#f5f0ff",letterSpacing:"-0.3px"}}>
-            {market.question}
-          </h2>
-
+          <h2 style={{fontSize:20,fontWeight:800,lineHeight:1.35,marginBottom:22,color:"#f5f0ff",letterSpacing:"-0.3px"}}>{market.question}</h2>
           {market.resolved && (
             <div style={{background:market.outcome?"rgba(5,150,105,0.1)":"rgba(220,38,38,0.1)",border:`1px solid ${market.outcome?"rgba(5,150,105,0.3)":"rgba(220,38,38,0.3)"}`,borderRadius:16,padding:22,marginBottom:20,textAlign:"center"}}>
               <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,color:market.outcome?"#6ee7b7":"#fca5a5",opacity:0.6,marginBottom:8}}>FINAL OUTCOME</div>
@@ -371,7 +360,6 @@ export default function App() {
               <div style={{fontSize:11,marginTop:8,color:"rgba(237,232,255,0.3)"}}>Resolved by AI · Optimistic Democracy</div>
             </div>
           )}
-
           <div style={{marginBottom:18}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
               <span style={{fontSize:13,fontWeight:700,color:"#34d399"}}>YES {yesPct}%</span>
@@ -380,7 +368,6 @@ export default function App() {
             </div>
             <div className="bar-track"><div className="bar-fill" style={{width:`${yesPct}%`}}/></div>
           </div>
-
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
             {[
               {l:"YES Pool",v:`${toGEN(market.total_yes)}`,s:`${market.yes_odds}x odds`,c:"#34d399"},
@@ -407,11 +394,9 @@ export default function App() {
           </div>
           <div className="hr" style={{marginBottom:20}}/>
 
-          {/* BET */}
           {tab==="bet" && (<>
             <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,color:"#7c3aed",textTransform:"uppercase",marginBottom:12}}>Bet Amount (GEN)</div>
             <input className="input" type="number" min="1" value={betAmt} onChange={e=>setBetAmt(e.target.value)} placeholder="100"/>
-
             <div style={{display:"flex",gap:8,margin:"12px 0 18px"}}>
               {["50","100","500","1000"].map(v=>(
                 <button key={v} className="qbtn" onClick={()=>setBetAmt(v)} style={{
@@ -421,7 +406,6 @@ export default function App() {
                 }}>{v}</button>
               ))}
             </div>
-
             {Number(betAmt)>0 && (
               <div style={{background:"rgba(139,92,246,0.07)",border:"1px solid rgba(139,92,246,0.14)",borderRadius:12,padding:"13px 16px",marginBottom:18,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                 <div style={{textAlign:"center"}}>
@@ -434,7 +418,6 @@ export default function App() {
                 </div>
               </div>
             )}
-
             {!account && (
               <div style={{background:"rgba(99,102,241,0.08)",border:"1px solid rgba(99,102,241,0.2)",borderRadius:12,padding:"12px 16px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
                 <span style={{fontSize:16}}>🦊</span>
@@ -442,7 +425,6 @@ export default function App() {
                 <button className="btn" onClick={()=>setShowWallet(true)} style={{marginLeft:"auto",background:"rgba(99,102,241,0.2)",border:"1px solid rgba(99,102,241,0.3)",color:"#a5b4fc",padding:"6px 14px",fontSize:12,borderRadius:8}}>Connect</button>
               </div>
             )}
-
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
               <button className="btn btn-yes" disabled={!!busy||!account} onClick={()=>bet("yes")}>
                 {busy==="yes"?<><span className="sp"/>Betting...</>:"✅ Bet YES"}
@@ -453,7 +435,6 @@ export default function App() {
             </div>
           </>)}
 
-          {/* RESOLVE */}
           {tab==="resolve" && (<>
             <div style={{background:"rgba(124,58,237,0.07)",border:"1px solid rgba(124,58,237,0.18)",borderRadius:14,padding:18,marginBottom:20}}>
               <div style={{fontSize:12,fontWeight:700,color:"#a78bfa",marginBottom:10}}>How AI Resolution Works</div>
@@ -476,7 +457,6 @@ export default function App() {
             </button>
           </>)}
 
-          {/* INFO */}
           {tab==="info" && (<>
             {[
               ["Contract",    CONTRACT_ADDRESS],
