@@ -135,12 +135,20 @@ export default function App() {
 
   const load = useCallback(async () => {
     try {
-      const result = await readClient.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: "get_state",
-        args: [],
+      const res = await fetch("https://studio.genlayer.com/api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "gen_call",
+          params: [{
+            to: CONTRACT_ADDRESS,
+            data: { method: "get_state", args: [] },
+          }],
+        }),
       });
-      setMarket(typeof result === "string" ? JSON.parse(result) : result);
+      const data = await res.json();
+      setMarket(JSON.parse(data.result));
     } catch {
       setMarket({
         question:"Will BTC reach 100000 USD before July 2026?",
