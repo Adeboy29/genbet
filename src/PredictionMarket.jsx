@@ -32,7 +32,7 @@ const readContract = async () => {
 
 // gasless — uses GenLayer's own RPC, no ETH gas needed
 const sendTx = async (from, method, valueGEN=0) => {
-  const hash = await glRpc("gen_sendRawTransaction", [{
+  const hash = await glRpc("eth_sendTransaction", [{
     from,
     to:    CONTRACT_ADDRESS,
     value: String(Math.floor(valueGEN * 1e18)),
