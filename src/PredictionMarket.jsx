@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x185626CBfB63234d0B4BC9f1924E9859D40CDe93"; // ← replace with your FULL address
+const CONTRACT_ADDRESS = "0x7dee81518166dBDa90Fa533110d9e154a9194aA1"; // ← replace with your FULL address
 const RPC_URL = "https://studio.genlayer.com/api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ const readContract = async () => {
 
 // gasless — uses GenLayer's own RPC, no ETH gas needed
 const sendTx = async (from, method, valueGEN=0) => {
-  const hash = await glRpc("gen_sendTransaction", [{
+  const hash = await glRpc("gen_sendRawTransaction", [{
     from,
     to:    CONTRACT_ADDRESS,
     value: String(Math.floor(valueGEN * 1e18)),
